@@ -23,11 +23,13 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.linecorp.armeria.client.ClientFactory;
+import com.linecorp.armeria.client.UnprocessedRequestException;
 import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.common.Flags;
 import com.linecorp.armeria.common.HttpData;
@@ -45,7 +47,7 @@ class HttpServerTlsCorruptionTest {
     private static final HttpData content;
 
     static {
-        final byte[] data = new byte[1048576];
+        final byte[] data = new byte[1048575];
         ThreadLocalRandom.current().nextBytes(data);
         content = HttpData.wrap(data);
     }
@@ -75,6 +77,7 @@ class HttpServerTlsCorruptionTest {
      * Makes sure Armeria is unaffected by https://github.com/netty/netty/issues/11792
      */
     @Test
+    @Timeout(Long.MAX_VALUE)
     void test() throws Throwable {
         final int numEventLoops = Flags.numCommonWorkers();
         final ClientFactory clientFactory = ClientFactory.builder()
@@ -88,8 +91,8 @@ class HttpServerTlsCorruptionTest {
         final Semaphore semaphore = new Semaphore(numEventLoops);
         final BlockingQueue<Throwable> caughtExceptions = new LinkedBlockingDeque<>();
         int i = 0;
-        try {
-            for (; i < 1000; i++) {
+        for (;; i++) {
+            try {
                 semaphore.acquire();
                 client.get("/")
                       .aggregate()
@@ -97,12 +100,13 @@ class HttpServerTlsCorruptionTest {
                           semaphore.release();
                           if (cause != null) {
                               caughtExceptions.add(cause);
-                          }
-                          try {
-                              assertThat(res.status()).isSameAs(HttpStatus.OK);
-                              assertThat(res.content()).isEqualTo(content);
-                          } catch (Throwable t) {
-                              caughtExceptions.add(t);
+                          } else {
+                              try {
+                                  assertThat(res.status()).isSameAs(HttpStatus.OK);
+                                  assertThat(res.content()).isEqualTo(content);
+                              } catch (Throwable t) {
+                                  caughtExceptions.add(t);
+                              }
                           }
                           return null;
                       });
@@ -111,10 +115,14 @@ class HttpServerTlsCorruptionTest {
                 if (cause != null) {
                     throw cause;
                 }
+            } catch (Throwable cause) {
+                if (cause instanceof UnprocessedRequestException) {
+                    continue;
+                }
+
+                logger.warn("Received a corrupt response after {} request(s)", i);
+                throw cause;
             }
-        } catch (Throwable cause) {
-            logger.warn("Received a corrupt response after {} request(s)", i);
-            throw cause;
         }
     }
 }
